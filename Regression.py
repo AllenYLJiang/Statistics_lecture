@@ -22,28 +22,6 @@ class LinearRegression:
         return np.dot(X, self.beta)
 
 
-class RidgeRegression:
-    def __init__(self, alpha=1, fit_intercept=True):
-        self.beta = None
-        self.alpha = alpha
-        self.fit_intercept = fit_intercept
-
-    def fit(self, X, y):
-        # convert X to a design matrix if we're fitting an intercept
-        if self.fit_intercept:
-            X = np.c_[np.ones(X.shape[0]), X]
-
-        A = self.alpha * np.eye(X.shape[1])
-        pseudo_inverse = np.linalg.inv(X.T @ X + A) @ X.T
-        self.beta = pseudo_inverse @ y
-
-    def predict(self, X):
-        # convert X to a design matrix if we're fitting an intercept
-        if self.fit_intercept:
-            X = np.c_[np.ones(X.shape[0]), X]
-        return np.dot(X, self.beta)
-
-
 class LogisticRegression:
     def __init__(self, penalty="l2", gamma=0, fit_intercept=True):
         err_msg = "penalty must be 'l1' or 'l2', but got: {}".format(penalty)
@@ -93,157 +71,143 @@ class LogisticRegression:
         return sigmoid(np.dot(X, self.beta))
 
 
-class BayesianLinearRegressionUnknownVariance:
-    def __init__(self, alpha=1, beta=2, b_mean=0, b_V=None, fit_intercept=True):
-        # this is a placeholder until we know the dimensions of X
-        b_V = 1.0 if b_V is None else b_V
+class Softmax(LayerBase):
+    def __init__(self, dim=-1, optimizer=None):
+        r"""
+        A softmax nonlinearity layer.
+        Notes
+        -----
+        This is implemented as a layer rather than an activation primarily
+        because it requires retaining the layer input in order to compute the
+        softmax gradients properly. In other words, in contrast to other
+        simple activations, the softmax function and its gradient are not
+        computed elementwise, and thus are more easily expressed as a layer.
+        The softmax function computes:
+        .. math::
+            y_i = \frac{e^{x_i}}{\sum_j e^{x_j}}
+        where :math:`x_i` is the `i` th element of input example **x**.
+        Parameters
+        ----------
+        dim: int
+            The dimension in `X` along which the softmax will be computed.
+            Default is -1.
+        optimizer : str, :doc:`Optimizer <numpy_ml.neural_nets.optimizers>` object, or None
+            The optimization strategy to use when performing gradient updates
+            within the :meth:`update` method.  If None, use the :class:`SGD
+            <numpy_ml.neural_nets.optimizers.SGD>` optimizer with
+            default parameters. Default is None. Unused for this layer.
+        """  # noqa: E501
+        super().__init__(optimizer)
 
-        if isinstance(b_V, list):
-            b_V = np.array(b_V)
+        self.dim = dim
+        self.n_in = None
+        self.is_initialized = False
 
-        if isinstance(b_V, np.ndarray):
-            if b_V.ndim == 1:
-                b_V = np.diag(b_V)
-            elif b_V.ndim == 2:
-                fstr = "b_V must be symmetric positive definite"
-                assert is_symmetric_positive_definite(b_V), fstr
+    def _init_params(self):
+        self.gradients = {}
+        self.parameters = {}
+        self.derived_variables = {}
+        self.is_initialized = True
 
-        self.b_V = b_V
-        self.beta = beta
-        self.alpha = alpha
-        self.b_mean = b_mean
-        self.fit_intercept = fit_intercept
-        self.posterior = {"mu": None, "cov": None}
-        self.posterior_predictive = {"mu": None, "cov": None}
-
-    def fit(self, X, y):
-        # convert X to a design matrix if we're fitting an intercept
-        if self.fit_intercept:
-            X = np.c_[np.ones(X.shape[0]), X]
-
-        N, M = X.shape
-        beta = self.beta
-        self.X, self.y = X, y
-
-        if is_number(self.b_V):
-            self.b_V *= np.eye(M)
-
-        if is_number(self.b_mean):
-            self.b_mean *= np.ones(M)
-
-        # sigma
-        I = np.eye(N)  # noqa: E741
-        a = y - np.dot(X, self.b_mean)
-        b = np.linalg.inv(np.dot(X, self.b_V).dot(X.T) + I)
-        c = y - np.dot(X, self.b_mean)
-
-        shape = N + self.alpha
-        sigma = (1 / shape) * (self.alpha * beta ** 2 + np.dot(a, b).dot(c))
-        scale = sigma ** 2
-
-        # b_sigma is the mode of the inverse gamma prior on sigma^2
-        b_sigma = scale / (shape - 1)
-
-        # mean
-        b_V_inv = np.linalg.inv(self.b_V)
-        L = np.linalg.inv(b_V_inv + X.T @ X)
-        R = b_V_inv @ self.b_mean + X.T @ y
-
-        mu = L @ R
-        cov = L * b_sigma
-
-        # posterior distribution for sigma^2 and c
-        self.posterior = {
-            "sigma**2": {"dist": "InvGamma", "shape": shape, "scale": scale},
-            "b | sigma**2": {"dist": "Gaussian", "mu": mu, "cov": cov},
+    @property
+    def hyperparameters(self):
+        """Return a dictionary containing the layer hyperparameters."""
+        return {
+            "layer": "SoftmaxLayer",
+            "n_in": self.n_in,
+            "n_out": self.n_in,
+            "optimizer": {
+                "cache": self.optimizer.cache,
+                "hyperparameters": self.optimizer.hyperparameters,
+            },
         }
 
-    def predict(self, X):
-        # convert X to a design matrix if we're fitting an intercept
-        if self.fit_intercept:
-            X = np.c_[np.ones(X.shape[0]), X]
+    def forward(self, X, retain_derived=True):
+        """
+        Compute the layer output on a single minibatch.
+        Parameters
+        ----------
+        X : :py:class:`ndarray <numpy.ndarray>` of shape `(n_ex, n_in)`
+            Layer input, representing the `n_in`-dimensional features for a
+            minibatch of `n_ex` examples.
+        retain_derived : bool
+            Whether to retain the variables calculated during the forward pass
+            for use later during backprop. If False, this suggests the layer
+            will not be expected to backprop through wrt. this input. Default
+            is True.
+        Returns
+        -------
+        Y : :py:class:`ndarray <numpy.ndarray>` of shape `(n_ex, n_out)`
+            Layer output for each of the `n_ex` examples.
+        """
+        if not self.is_initialized:
+            self.n_in = X.shape[1]
+            self._init_params()
 
-        I = np.eye(X.shape[0])  # noqa: E741
-        mu = np.dot(X, self.posterior["b | sigma**2"]["mu"])
-        cov = np.dot(X, self.posterior["b | sigma**2"]["cov"]).dot(X.T) + I
+        Y = self._fwd(X)
 
-        # MAP estimate for y corresponds to the mean of the posterior
-        # predictive
-        self.posterior_predictive["mu"] = mu
-        self.posterior_predictive["cov"] = cov
-        return mu
+        if retain_derived:
+            self.X.append(X)
 
+        return Y
 
-class BayesianLinearRegressionKnownVariance:
-    def __init__(self, b_mean=0, b_sigma=1, b_V=None, fit_intercept=True):
-        # this is a placeholder until we know the dimensions of X
-        b_V = 1.0 if b_V is None else b_V
+    def _fwd(self, X):
+        """Actual computation of softmax forward pass"""
+        # center data to avoid overflow
+        e_X = np.exp(X - np.max(X, axis=self.dim, keepdims=True))
+        return e_X / e_X.sum(axis=self.dim, keepdims=True)
 
-        if isinstance(b_V, list):
-            b_V = np.array(b_V)
+    def backward(self, dLdy, retain_grads=True):
+        """
+        Backprop from layer outputs to inputs.
+        Parameters
+        ----------
+        dLdy : :py:class:`ndarray <numpy.ndarray>` of shape `(n_ex, n_out)` or list of arrays
+            The gradient(s) of the loss wrt. the layer output(s).
+        retain_grads : bool
+            Whether to include the intermediate parameter gradients computed
+            during the backward pass in the final parameter update. Default is
+            True.
+        Returns
+        -------
+        dLdX : :py:class:`ndarray <numpy.ndarray>` of shape `(n_ex, n_in)`
+            The gradient of the loss wrt. the layer input `X`.
+        """  # noqa: E501
+        assert self.trainable, "Layer is frozen"
+        if not isinstance(dLdy, list):
+            dLdy = [dLdy]
 
-        if isinstance(b_V, np.ndarray):
-            if b_V.ndim == 1:
-                b_V = np.diag(b_V)
-            elif b_V.ndim == 2:
-                fstr = "b_V must be symmetric positive definite"
-                assert is_symmetric_positive_definite(b_V), fstr
+        dX = []
+        X = self.X
+        for dy, x in zip(dLdy, X):
+            dx = self._bwd(dy, x)
+            dX.append(dx)
 
-        self.posterior = {}
-        self.posterior_predictive = {}
+        return dX[0] if len(X) == 1 else dX
 
-        self.b_V = b_V
-        self.b_mean = b_mean
-        self.b_sigma = b_sigma
-        self.fit_intercept = fit_intercept
-
-    def fit(self, X, y):
-        # convert X to a design matrix if we're fitting an intercept
-        if self.fit_intercept:
-            X = np.c_[np.ones(X.shape[0]), X]
-
-        N, M = X.shape
-        self.X, self.y = X, y
-
-        if is_number(self.b_V):
-            self.b_V *= np.eye(M)
-
-        if is_number(self.b_mean):
-            self.b_mean *= np.ones(M)
-
-        b_V = self.b_V
-        b_mean = self.b_mean
-        b_sigma = self.b_sigma
-
-        b_V_inv = np.linalg.inv(b_V)
-        L = np.linalg.inv(b_V_inv + X.T @ X)
-        R = b_V_inv @ b_mean + X.T @ y
-
-        mu = L @ R
-        cov = L * b_sigma ** 2
-
-        # posterior distribution over b conditioned on b_sigma
-        self.posterior["b"] = {"dist": "Gaussian", "mu": mu, "cov": cov}
-
-    def predict(self, X):
-        # convert X to a design matrix if we're fitting an intercept
-        if self.fit_intercept:
-            X = np.c_[np.ones(X.shape[0]), X]
-
-        I = np.eye(X.shape[0])  # noqa: E741
-        mu = np.dot(X, self.posterior["b"]["mu"])
-        cov = np.dot(X, self.posterior["b"]["cov"]).dot(X.T) + I
-
-        # MAP estimate for y corresponds to the mean of the posterior
-        # predictive distribution
-        self.posterior_predictive = {"dist": "Gaussian", "mu": mu, "cov": cov}
-        return mu
-
+    def _bwd(self, dLdy, X):
+        """
+        Actual computation of the gradient of the loss wrt. the input X.
+        The Jacobian, J, of the softmax for input x = [x1, ..., xn] is:
+            J[i, j] =
+                softmax(x_i)  * (1 - softmax(x_j))  if i = j
+                -softmax(x_i) * softmax(x_j)        if i != j
+            where
+                x_n is input example n (ie., the n'th row in X)
+        """
+        dX = []
+        for dy, x in zip(dLdy, X):
+            dxi = []
+            for dyi, xi in zip(*np.atleast_2d(dy, x)):
+                yi = self._fwd(xi.reshape(1, -1)).reshape(-1, 1)
+                dyidxi = np.diagflat(yi) - yi @ yi.T  # jacobian wrt. input sample xi
+                dxi.append(dyi @ dyidxi)
+            dX.append(dxi)
+        return np.array(dX).reshape(*X.shape)
 
 #######################################################################
 #                                Utils                                #
 #######################################################################
-
 
 def sigmoid(x):
     """The logistic sigmoid function"""
